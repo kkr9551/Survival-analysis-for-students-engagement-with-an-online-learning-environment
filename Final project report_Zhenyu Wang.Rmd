@@ -1,0 +1,352 @@
+---
+title: "Survival Analysis for Students Online Engagement"
+author: "Zhenyu Wang"
+date: "2022-12-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(readr)
+library(tibble)
+library(stringr)
+library(flipTime)
+library(tm)
+library(survival)
+library(survminer)
+library(Rcpp)
+library(chron)
+library(magrittr)
+library(lubridate)
+library(ggpubr)
+
+```
+
+## Introduction
+
+Flipped classrooms and MOOCs (Massive Open Online Courses) have become more prevalent since the outbreak of COVID-19. Online learning would inevitably bring more changes to students in the post-covid era. It is never just an alternative to on-site study, similar to distant learning to reduce the trouble caused by geological limitations and other emergencies. Compared with traditional classrooms, online learning blurs the borders of learning in time and space. Online learners have been exposed to a broad network of learning resources thanks to the internet, fulfilling a more sustainable and affordable experience. However, problems remain regarding students' perseverance with online learning before, during, and after specific time points such as emergencies. Despite previous exploratory research findings (e.g. Esperanza et al., 2016; Subramaniam & Muniandy, 2017) that students in the flipped classroom are more engaged in learning specific courses, fewer studies attend to whether observed positive effects of online learning are sustainable whatever events occur in the real world. Spitzer et al. (2021) discovered that the proportion of students active online during and after the closure of schools owing to COVID lockdowns dropped significantly compared with data in the previous three years. It is reasonable to doubt perseverance with online learning in the flipped class, given some inevitable periods when students are absent from school for one week or longer. This data analysis project aims to explore Estonian high school pupils' engagement with online learning in an elective: digital products and technologies with survival analysis methods.
+
+Codesters Club, launched and supported by Riesenkampff Foundation, has provided flipped classrooms for Estonian high school students (gymnasium level pupils) for around three years. Unlike traditional classrooms and computer science courses, Codester Club abandons the rigid structure in which teachers require students to follow designed directions; instead, the learning programme covers practical skills in programming and design and soft techniques, both of which are critical to delivering digital products through the combination of teamwork and individual development. Codesters Club has an online learning platform for students to learn independently, prepare before live classes, and complete and submit assignments. Students always need to do homework with other software such as Figma; however, all the learning materials are on the website of Codesters Club. Apart from reviewing stuff, students should also check and read feedback mentors give to their homework. Without analysing online user data, we can never know if this website can satisfy user needs and how they participate in independent learning outside the classroom.
+
+![](images/Screenshot%202022-12-28%20at%2022.36.12.png)
+
+```{r, echo=FALSE}
+output_logs_hashed_1_ <- read_csv("/Users/oushinu/Final project/output_logs_hashed (1).csv")
+```
+
+## Data pre-processing
+
+```{r, echo=FALSE}
+output_logs_hashed_1_$Time <- str_split(output_logs_hashed_1_$Time, ",", simplify = TRUE)
+date <- AsDate(output_logs_hashed_1_$Time[,1])
+time <- chron(times = output_logs_hashed_1_$Time[,2])
+new_output <- cbind(output_logs_hashed_1_, date, time)
+new_output <- new_output %>% 
+  select(date, time, `User full name`, `Affected user`, `Event context`, `Event name`)
+```
+
+```{r, echo=FALSE}
+str(new_output)
+all_events <- unique(new_output$`Event name`)
+all_users <- unique(new_output$`User full name`)
+affected <- unique(new_output$`Affected user`)
+context_event <- unique(new_output$`Event context`)
+```
+
+Because of technical issues, with the data on previous years missing, the data set covers the raw data on time, users, and events in 2022 from the mid of May to the end of November. The data type is all characters, even the time and date. Nevertheless, relying on the popular package lubridate cannot clean the time stored in irregular forms. I eventually found the package fliptime and chron, which works well with dealing with informal data forms. Finally, I added two new variables: date and time ahead of other columns.
+
+```{r, echo=FALSE}
+arranged_output <- new_output %>% 
+  arrange(date, time) %>% 
+  filter(date >= '2022-09-05')
+length(unique(arranged_output$`User full name`))
+total_users <- unique(arranged_output$`User full name`)
+all_perf <- unique(arranged_output$`Event name`)
+
+submission <- arranged_output %>% filter(`Event name` == 'Submission created.')
+unique(is.na(submission$`User full name`))
+length(unique(submission$`User full name`))
+student_users <- unique(submission$`User full name`)
+
+mentor_perf <- arranged_output %>% 
+  filter(`Event name` %in% c("Slot mark updated", "Course module deleted", "Group member added", "Role assigned", "The submission has been graded."))
+mentor_users <- unique(mentor_perf$`User full name`)
+unique(is.na(mentor_perf$`User full name`))
+identical(student_users, mentor_users)
+
+students_output <- arranged_output %>% 
+  filter(`User full name` %in% student_users)
+```
+
+The sorted data set contains three kinds of data: date(YMD), time(hms), and character data. Then, I used the package dplyr to transform data. The first goal is to filter data on students from September to November; other tasks include categorising data by three grades and adding a new column of every student's active hours (for every student, the active hours of every date is equal to the max value minus the minimum value in the vector).
+
+The result displays 305 users online since 5th September, 2022, including mentor users. After transforming data, I extracted 280 student users' data.
+
+## EDA(Exploratory Data Analysis) process
+
+Further transformation divided students into three grades; I used the str_detect function for detecting key words in the column "Event context". The result shows 122 10th grade students, 94 11th-grade students, and 65 12th-grade students.
+
+```{r, echo=FALSE}
+arranged_10th_ <- students_output %>% 
+  filter(str_detect(`Event context`, "C01...")) %>%
+  group_by(`User full name`) %>%
+  select(date, time, `User full name`) %>%
+  mutate(time = period_to_seconds(hms(time)))
+
+length(unique(arranged_10th_$`User full name`))
+unique(is.na(arranged_10th_$`User full name`))
+
+nameL_10 <- head(unique(arranged_10th_$`User full name`), 45)
+
+sorted_arr_10 <- arranged_10th_ %>%
+  filter(`User full name` %in% nameL_10) %>%
+  group_by(date, `User full name`) %>%
+  summarise(max(time) - min(time)) 
+
+sorted_arr_10 <- sorted_arr_10 %>%
+  arrange(`User full name`) %>%
+  filter(`max(time) - min(time)` != 0) %>%
+  mutate(`Active hours` = `max(time) - min(time)` / 3600)
+
+arranged_11th_ <- students_output %>% 
+  filter(str_detect(`Event context`, "C02...")) %>% 
+  group_by(`User full name`) %>%
+  select(date, time, `User full name`) %>%
+  mutate(time = period_to_seconds(hms(time)))
+
+length(unique(arranged_11th_$`User full name`))
+unique(is.na(arranged_11th_$`User full name`))
+
+nameL_11 <- head(unique(arranged_11th_$`User full name`), 45)
+
+sorted_arr_11 <- arranged_11th_ %>%
+  filter(`User full name` %in% nameL_11) %>%
+  group_by(date, `User full name`) %>%
+  summarise(max(time) - min(time))
+
+sorted_arr_11 <- sorted_arr_11 %>%
+  arrange(`User full name`) %>%
+  filter(`max(time) - min(time)` != 0) %>%
+  mutate(`Active hours` = `max(time) - min(time)` / 3600)
+
+arranged_12th_ <- students_output %>%
+  filter(str_detect(`Event context`, "C03...")) %>% 
+  group_by(`User full name`) %>%
+  select(date, time, `User full name`) %>%
+  mutate(time = period_to_seconds(hms(time)))
+
+length(unique(arranged_12th_$`User full name`))
+unique(is.na(arranged_12th_$`User full name`))
+
+nameL_12 <- head(unique(arranged_12th_$`User full name`), 45)
+
+sorted_arr_12 <- arranged_12th_ %>%
+  filter(`User full name` %in% nameL_12) %>%
+  group_by(date, `User full name`) %>%
+  summarise(max(time) - min(time))
+
+sorted_arr_12 <- sorted_arr_12 %>%
+  arrange(`User full name`) %>%
+  filter(`max(time) - min(time)` != 0) %>%
+  mutate(`Active hours` = `max(time) - min(time)` / 3600)
+
+sorted_arr_12 <- sorted_arr_12 %>%
+  mutate(Grade = "12th")
+
+sorted_arr_11 <- sorted_arr_11 %>%
+  mutate(Grade = "11th")
+
+sorted_arr_10 <- sorted_arr_10 %>%
+  mutate(Grade = "10th")
+
+final_sorted <- rbind(sorted_arr_10, sorted_arr_11, sorted_arr_12)
+```
+
+```{r, echo=FALSE}
+ggplot(final_sorted, aes(x = date, y = `Active hours`, color = Grade)) +
+  geom_point() +
+  facet_wrap(~Grade)
+```
+
+This scatter-point plot visualises how many hours 135 students spent learning online. It is apparent that by the end of November, the number of 11th and 12th-grade students who should have been active dropped sharply since the 30th of November. Another noticeable thing is that the density of points gets thinner before the beginning of November ---- the inactive period occurred around the mid-term among students regardless of grades. We can assume that active students became fewer with the time moving close to the midterm during which students do not need to go to school. The difference between changes in the proportion of active students in different grades might be significant because of various course plans.
+
+Based on the observation in descriptive statistics, I revised and specified the research question:
+
+Q1: How does 10th-grade students' perseverance with the online learning environment differ from 11th-grade students before the mid-term?
+
+Q2: How do 11th-grade students differ from 12th-grade students in their perseverance with the online learning environment during the same period?
+
+## Survival analysis
+
+This project uses survival analysis to evaluate students' online engagement. Survival analysis is a data analysis approach targeting time-event data: the outcome variable is the time until an event occurs. Prevalently used in medical studies, survival analysis plays a role in comparing and estimating hazard ratios and surviving probabilities across patients. Many studies (e.g. ) also applied this method to assess online learners' engagement. Specifically, this project evaluates students' engagement(survival probabilities) and dropout rates(hazard ratio) before a specific time point, the mid-term.
+
+In this project, the survival function S(t) becomes the probability of being active until the first day (24th of October) of the mid-term this semester. Thus, I define survival time as the number of active days that passed from the first day for registration until the event (24th of October) and death as the last activity by that event. With the package dplyr, I sorted out a table to code students who were still active during the mid-term as 0 (censored data) and students who dropped out before the mid-term as 1 (failure). This table functions as the foundation of survival analysis. Also, I installed and loaded the package Survival and survminer, both of which provide necessary functions. The function survfit generates an estimate of the survival curve for censored data in a single event survival with a Kaplan-Meier (KM) estimate. Then, I used the function ggsurvplot to create KM curves. To compare the difference between KM curves, I used the log-rank test. It is a large sample Chi-square test, generating an overall comparison of KM curves; the mechanics undergirding this test is similar to the Chi-square Goodness-of-fit test: assessing the association between categories between observed versus expected counts of failures. Thus, The null hypothesis is that there is no difference between KM curves; the alternative hypothesis is that KM curves differ across three grades.
+
+```{r, echo=FALSE}
+befEndMid_10th <- sorted_arr_10 %>% 
+  filter(date <= '2022-10-30')
+
+active_af23_10th <- befEndMid_10th %>% 
+  filter(date <= '2022-10-30' & date > '2022-10-23')
+
+active_pupils_10th <- unique(active_af23_10th$`User full name`)
+
+active_mid_10th <- befEndMid_10th %>%
+  filter(`User full name` %in% active_pupils_10th, 
+         date < '2022-10-24') %>%
+  select(date, `User full name`, Grade) %>%
+  group_by(`User full name`) %>%
+  summarise(Active_days = length(unique(date))) %>% 
+  mutate(d = 0) %>%
+  mutate(Grade = "10th")
+
+active_befM_10th <- befEndMid_10th %>%
+  filter(!(`User full name` %in% active_pupils_10th)) %>%
+  select(date, `User full name`, Grade) %>%
+  group_by(`User full name`) %>%
+  summarise(Active_days = length(unique(date))) %>%
+  mutate(d = 1) %>%
+  mutate(Grade = "10th")
+```
+
+```{r, echo=FALSE}
+befEndMid_11th <- sorted_arr_11 %>% 
+  filter(date <= '2022-10-30')
+
+active_af23_11th <- befEndMid_11th %>% 
+  filter(date <= '2022-10-30' & date > '2022-10-23')
+
+active_pupils_11th <- unique(active_af23_11th$`User full name`)
+
+active_mid_11th <- befEndMid_11th %>%
+  filter(`User full name` %in% active_pupils_11th, 
+         date < '2022-10-24') %>%
+  select(date, `User full name`, Grade) %>%
+  group_by(`User full name`) %>%
+  summarise(Active_days = length(unique(date))) %>% 
+  mutate(d = 0) %>%
+  mutate(Grade = "11th")
+
+active_befM_11th <- befEndMid_11th %>%
+  filter(!(`User full name` %in% active_pupils_11th)) %>%
+  select(date, `User full name`, Grade) %>%
+  group_by(`User full name`) %>%
+  summarise(Active_days = length(unique(date))) %>%
+  mutate(d = 1) %>%
+  mutate(Grade = "11th")
+
+
+active_table_10 <- rbind(active_mid_10th, active_befM_10th)
+active_table_11 <- rbind(active_mid_11th, active_befM_11th)
+active_table_10V11 <- rbind(active_table_10, active_table_11)
+
+active_table_10V11
+
+fit_10V11 <- survfit(Surv(active_table_10V11$Active_days, active_table_10V11$d) ~ active_table_10V11$Grade, 
+                     active_table_10V11)
+summary(fit_10V11)
+
+ggsurvplot(fit_10V11,
+           active_table_10V11,
+           pval = TRUE,
+           risk.table = TRUE,
+           surv.median.line = 'hv',
+           ggtheme = theme_bw(),
+           palette = c("#E7B800", "#2E9FDF"),
+           conf.int = TRUE,
+           risk.table.col = "strata",
+           xlab = 'Active slots',
+           ylab = 'P (Still active)',
+           legend.lab = c('10th grade', '11th grade'))
+
+survdiff(Surv(active_table_10V11$Active_days, active_table_10V11$d) ~ Grade, active_table_10V11)
+```
+
+The KM curves between 10th-grade and 11th-grade students above show that the data provides strong evidence to reject the null hypothesis since the P-value is far below 0.0001. Compared with ten active days (CL: 9-11) for 11th-grade students, the median active days for 10th-grade students are 15 days (CL: 13-17).
+
+```{r, echo=FALSE}
+befEndMid_12th <- sorted_arr_12 %>% 
+  filter(date <= '2022-10-30')
+
+active_af23_12th <- befEndMid_12th %>% 
+  filter(date <= '2022-10-30' & date > '2022-10-23')
+
+active_pupils_12th <- unique(active_af23_12th$`User full name`)
+
+active_mid_12th <- befEndMid_12th %>%
+  filter(`User full name` %in% active_pupils_12th, 
+         date < '2022-10-24') %>%
+  select(date, `User full name`, Grade) %>%
+  group_by(`User full name`) %>%
+  summarise(Active_days = length(unique(date))) %>% 
+  mutate(d = 0) %>%
+  mutate(Grade = "12th")
+
+active_befM_12th <- befEndMid_12th %>%
+  filter(!(`User full name` %in% active_pupils_12th)) %>%
+  select(date, `User full name`, Grade) %>%
+  group_by(`User full name`) %>%
+  summarise(Active_days = length(unique(date))) %>%
+  mutate(d = 1) %>%
+  mutate(Grade = "12th")
+
+active_table_12 <- rbind(active_mid_12th, active_befM_12th)
+active_table_11V12 <- rbind(active_table_11, active_table_12)
+
+fit_11V12 <- survfit(Surv(active_table_11V12$Active_days, active_table_11V12$d) ~ active_table_11V12$Grade, 
+                     active_table_11V12)
+summary(fit_11V12)
+
+ggsurvplot(fit_11V12,
+           active_table_11V12,
+           pval = TRUE,
+           risk.table = TRUE,
+           surv.median.line = 'hv',
+           ggtheme = theme_bw(),
+           palette = c("#2E9FDF", "#DF2E2E"),
+           conf.int = TRUE,
+           risk.table.col = "strata",
+           xlab = 'Active slots',
+           ylab = 'P (Still active)',
+           legend.lab = c('11th grade', '12th grade'))
+
+survdiff(Surv(active_table_11V12$Active_days, active_table_11V12$d) ~ Grade, active_table_11V12) 
+```
+
+By contrast, the curves between 11th-grade and 12th-grade students display weak or no evidence to support the alternative hypothesis (P = 0.79). The median of active days for 12th-grade pupils is 10 (CL: 8-11), too. In other words, the difference between the two curves for 11th and 12th-grade students is tiny.
+
+## Discussion
+
+![](images/Screenshot%202022-12-15%20at%2011.01.33.png)
+
+![](images/Screenshot%202022-12-15%20at%2011.01.58.png)
+
+The results are similar to what I presented on the 15th of December even though I removed ineffective data \-\-\-- the rows whose active hours are equal to 0. Such rows exist because the website stored the date and time an individual user started activity without logging the time they ended online performances. However, I did not determine the significance level in reviewing the data analysis for this report. Without thoroughly understanding the significance level or P-value, novice researchers or students easily trap themselves in the superstition of a lower P-value. For instance, had I decided the significance level to be 1 per cent, the previous presentation might have reached a different conclusion. According to the ASA statement (Bruce et al., 2020; Wasserstein & Lazar, 2016), the P-value represents the probability that extreme results might occur against a chance model. Chasing the lowest P-value would lead to confusion as that lowest decimal cannot prove the hypotheses to be true. Removing ineffective data may either strengthen or qualify the previous results; rather than relying on the significance level and P-value, neither of which can determine the correctness of studied hypotheses, it is more sensible to test the reliability of inferential analysis in samples of different sizes, more sorted data sets, and more appropriate mathematic models.
+
+### Limitations and future research
+
+Though the log-rank test is flexible, its inability to deal with the problem surrounding covariance influences the reliability of data analysis results. By contrast, Cox proportional haphazard (PH) models are more suitable as we should consider the connection between students' active hours on the Codesters Club website and their engagement with other online platforms; for instance, some software they have to use for homework. Also, Cox PH models provide a thinking pattern for dealing with recurrent events, on which this project should also focus. For example, a similar time point when students do not need to attend school for a long time occurs again before Christmas. Finally, this project needs a validation replica. The initial purpose of starting this project is to compare engagement during and after the school closures last year and this year. However, we have no access to the data for technical issues.
+
+## Conclusion
+
+This project applies survival analysis to evaluate gymnasium-level pupils' engagement with an online learning environment. The analysis results reveal that owing to more time spent on other platforms for programming practice and teamwork, 50 per cent of 11th-grade and 50 per cent of 12th-grade students left the Codesters Club website within ten days; while 50 per cent of them dropped in longer than ten days. Only one 12th-grade student was active during the mid-term after 20 days. By contrast, six students in the tenth grade were still active after 21 days; more stuff to read and more new skills to learn can explain why 10th-grade pupils were more engaged than the other two grades. Future studies should focus on covariates and how to use Cox PH models to re-assess their perseverance.
+
+## Reference:
+
+Bacca‐Acosta, J., & Avila‐Garzon, C. (2020). Student engagement with mobile‐based assessment systems: A survival analysis. Journal of Computer Assisted Learning, 37(1), 158--171. <https://doi.org/10.1111/jcal.12475>
+
+Bruce, A., Bruce, P., & Gedeck, P. (2020). Statistical experiments and significance testing. In Practical Statistics for Data Scientists: 50+ Essential Concepts Using R and Python (2nd ed., pp. 87--139). O'Reilly Media. Chen, C., Sonnert, G., Sadler, P. M., Sasselov, D. D., Fredericks, C., & Malan, D. J. (2020). Going over the cliff: MOOC dropout behavior at chapter transition. Distance Education, 41(1), 6--25. <https://doi.org/10.1080/01587919.2020.1724772>
+
+Esperanza, P., Fabian, K., & Toto, C. (2016). Flipped Classroom Model: Effects on Performance, Attitudes and Perceptions in High School Algebra. Adaptive and Adaptable Learning, 85--97. <https://doi.org/10.1007/978-3-319-45153-4_7>
+
+Kleinbaum, M., & Klein, M. (2011). Survival Analysis: A Self-Learning Text, Third Edition. Springer Publishing. Schult, J., Mahler, N., Fauth, B., & Lindner, M. A. (2022). Did students learn less during the COVID-19 pandemic? Reading and mathematics competencies before and after the first pandemic wave. School Effectiveness and School Improvement, 33(4), 544--563. <https://doi.org/10.1080/09243453.2022.2061014>
+
+Spitzer, M. W. H., Gutsfeld, R., Wirzberger, M., & Moeller, K. (2021). Evaluating students' engagement with an online learning environment during and after COVID-19 related school closures: A survival analysis approach. Trends in Neuroscience and Education, 25, 100168. <https://doi.org/10.1016/j.tine.2021.100168>
+
+Subramaniam, S. R., & Muniandy, B. (2017). The Effect of Flipped Classroom on Students' Engagement. Technology, Knowledge and Learning, 24(3), 355--372. <https://doi.org/10.1007/s10758-017-9343-y>
+
+Wasserstein, R. L., & Lazar, N. A. (2016). The ASA Statement on p-Values: Context, Process, and Purpose. The American Statistician, 70(2), 129--133. <https://doi.org/10.1080/00031305.2016.1154108>
